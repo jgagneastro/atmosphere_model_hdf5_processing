@@ -46,6 +46,62 @@ def fetchone_dict(conn, sql, args=()):
         return cur.fetchone()
 
 # -----------------------
+# HDF5 helpers
+# -----------------------
+def _to_h5_attr(v):
+    """Convert arbitrary DB values to something h5py can store as an attribute."""
+    if v is None:
+        return None
+
+    # bytes -> utf-8 string (safe fallback)
+    if isinstance(v, (bytes, bytearray, memoryview)):
+        try:
+            return bytes(v).decode("utf-8")
+        except Exception:
+            return bytes(v).hex()
+
+    # numpy scalars -> python scalars
+    if isinstance(v, np.generic):
+        return v.item()
+
+    # datetime/date/time objects -> ISO string
+    try:
+        import datetime as _dt
+        if isinstance(v, (_dt.datetime, _dt.date, _dt.time)):
+            return v.isoformat()
+    except Exception:
+        pass
+
+    # decimal.Decimal -> float if finite, else string
+    try:
+        import decimal as _dec
+        if isinstance(v, _dec.Decimal):
+            try:
+                return float(v)
+            except Exception:
+                return str(v)
+    except Exception:
+        pass
+
+    # Basic scalar types are OK
+    if isinstance(v, (str, int, float, bool)):
+        return v
+
+    # Lists/tuples: try numeric array, otherwise stringify
+    if isinstance(v, (list, tuple)):
+        try:
+            arr = np.asarray(v)
+            # If it's an object array, h5py attrs will choke; store as string
+            if arr.dtype == object:
+                return str(v)
+            return arr
+        except Exception:
+            return str(v)
+
+    # Dicts/sets/other objects: store as string
+    return str(v)
+
+# -----------------------
 # Common-grid check
 # -----------------------
 def get_wavelengths_for_gridpoint(conn, mgridid, gridpoint_id):
@@ -181,13 +237,15 @@ def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf", a
             # meta as attrs
             meta_grp = h5.create_group("meta")
             for k, v in meta.items():
-                if v is None:
+                hv = _to_h5_attr(v)
+                if hv is None:
                     continue
-                # HDF5 attrs don't love long TEXT; store short-ish ones safely
-                if isinstance(v, (bytes, str)):
+                try:
+                    # Store short-ish ones safely; for anything else, _to_h5_attr will coerce
+                    meta_grp.attrs[k] = hv
+                except TypeError:
+                    # Last-resort fallback for object dtypes
                     meta_grp.attrs[k] = str(v)
-                else:
-                    meta_grp.attrs[k] = v
 
             # parameters
             pgrp = h5.create_group("parameters")
