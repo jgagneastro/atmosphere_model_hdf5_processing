@@ -20,11 +20,11 @@ def _require_env(var_name: str) -> str:
 
 def db_connect():
     # Expect your usual env vars (adapt to your ~/.moca_db.env)
-    host = _require_env("MOCA_HOST")
-    user = _require_env("MOCA_USERNAME")
-    passwd = _require_env("MOCA_PASSWORD")
-    db = _require_env("MOCA_DBNAME")
-    port = int(os.environ.get("MOCA_PORT", "3306"))
+    host = _require_env("ATM_HOST")
+    user = _require_env("ATM_USERNAME")
+    passwd = _require_env("ATM_PASSWORD")
+    db = _require_env("ATM_DBNAME")
+    port = int(os.environ.get("ATM_PORT", "3306"))
     return pymysql.connect(
         host=host,
         user=user,
