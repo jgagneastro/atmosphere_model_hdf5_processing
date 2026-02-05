@@ -8,16 +8,31 @@ import pymysql
 # -----------------------
 # DB helpers
 # -----------------------
+def _require_env(var_name: str) -> str:
+    v = os.environ.get(var_name)
+    if v is None or str(v).strip() == "":
+        raise RuntimeError(
+            f"Missing required environment variable {var_name}. "
+            f"Did you `source ~/.moca_db.env` (or equivalent) before running?"
+        )
+    return v
+
+
 def db_connect():
     # Expect your usual env vars (adapt to your ~/.moca_db.env)
-    host = os.environ["MOCA_HOST"]
-    user = os.environ["MOCA_USERNAME"]
-    passwd = os.environ["MOCA_PASSWORD"]
-    db = os.environ["MOCA_DBNAME"]
+    host = _require_env("MOCA_HOST")
+    user = _require_env("MOCA_USERNAME")
+    passwd = _require_env("MOCA_PASSWORD")
+    db = _require_env("MOCA_DBNAME")
     port = int(os.environ.get("MOCA_PORT", "3306"))
     return pymysql.connect(
-        host=host, user=user, password=passwd, database=db, port=port,
-        charset="utf8mb4", autocommit=True
+        host=host,
+        user=user,
+        password=passwd,
+        database=db,
+        port=port,
+        charset="utf8mb4",
+        autocommit=True,
     )
 
 def fetchall_dict(conn, sql, args=()):
@@ -335,12 +350,59 @@ def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf"):
 # -----------------------
 if __name__ == "__main__":
     import argparse
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--moca_mgridid", required=True)
-    ap.add_argument("--outdir", required=True)
-    ap.add_argument("--compression", default="lzf", choices=["lzf", "gzip"])
+
+    ap = argparse.ArgumentParser(
+        description="Export one MOCA model grid (moca_mgridid) to an HDF5 file.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  source ~/.moca_db.env\n"
+            "  ./process_moca_mgridid.py 12 --outdir /scratch/$USER/grids\n"
+            "  python process_moca_mgridid.py --moca_mgridid 12 --outdir ./out --compression gzip\n"
+        ),
+    )
+
+    # Accept mgridid as positional OR as a flag (alias)
+    ap.add_argument(
+        "moca_mgridid",
+        nargs="?",
+        help="MOCA model grid id to export (same as --moca_mgridid).",
+    )
+    ap.add_argument(
+        "--moca_mgridid",
+        dest="moca_mgridid_flag",
+        help="MOCA model grid id to export.",
+    )
+
+    ap.add_argument("--outdir", required=True, help="Output directory for the HDF5 file")
+    ap.add_argument("--outfile", default=None, help="Optional explicit output filename (overrides default)")
+    ap.add_argument("--compression", default="lzf", choices=["lzf", "gzip"], help="HDF5 compression")
+    ap.add_argument(
+        "--sample-check-n",
+        type=int,
+        default=3,
+        help="How many gridpoints to sample when checking for a common wavelength grid",
+    )
+
     args = ap.parse_args()
 
+    # Resolve moca_mgridid from positional or flag
+    mgridid = args.moca_mgridid_flag if args.moca_mgridid_flag is not None else args.moca_mgridid
+    if mgridid is None:
+        ap.error("moca_mgridid is required (provide positional moca_mgridid or --moca_mgridid)")
+
     os.makedirs(args.outdir, exist_ok=True)
-    out_path = os.path.join(args.outdir, f"models_{args.moca_mgridid}.h5")
-    export_one_mgridid(args.moca_mgridid, out_path, compression=args.compression)
+
+    if args.outfile is None:
+        out_path = os.path.join(args.outdir, f"models_{mgridid}.h5")
+    else:
+        out_path = args.outfile
+        if not os.path.isabs(out_path):
+            out_path = os.path.join(args.outdir, out_path)
+
+    export_one_mgridid(
+        mgridid,
+        out_path,
+        sample_check_n=args.sample_check_n,
+        compression=args.compression,
+    )
