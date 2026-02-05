@@ -4,6 +4,12 @@ import math
 import numpy as np
 import h5py
 import pymysql
+import time
+
+
+def _log(msg: str) -> None:
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
 
 # -----------------------
 # DB helpers
@@ -137,7 +143,9 @@ def is_common_grid(conn, mgridid, gridpoint_ids, rtol=0.0, atol=0.0):
 def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf", allow_multiple_fileids: bool = True):
     conn = db_connect()
     try:
+        _log(f"Connected to DB. Exporting moca_mgridid={mgridid} -> {out_path}")
         # ---- moca_model_grids metadata
+        _log("Fetching grid metadata (moca_model_grids)")
         meta = fetchone_dict(
             conn,
             "SELECT * FROM moca_model_grids WHERE moca_mgridid=%s",
@@ -147,6 +155,7 @@ def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf", a
             raise RuntimeError(f"Unknown moca_mgridid={mgridid}")
 
         # ---- parameter definitions
+        _log("Fetching parameter definitions (moca_model_grid_parameters)")
         pars = fetchall_dict(
             conn,
             """
@@ -161,6 +170,7 @@ def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf", a
         npar = len(par_names)
 
         # ---- gridpoints (pivot in python)
+        _log("Fetching gridpoint parameter rows (data_model_grid_points)")
         rows = fetchall_dict(
             conn,
             """
@@ -173,11 +183,13 @@ def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf", a
         )
         if not rows:
             raise RuntimeError(f"No gridpoints in data_model_grid_points for {mgridid}")
+        _log(f"Loaded {len(rows):,} gridpoint-parameter rows")
 
         # Unique ordered gridpoint ids
         gp_ids = sorted({r["model_gridpoint_id"] for r in rows})
         ngp = len(gp_ids)
         gp_index = {gp: i for i, gp in enumerate(gp_ids)}
+        _log(f"Found {ngp:,} unique model_gridpoint_id values")
 
         # moca_mgridfileid per gridpoint (allow multiple if configured)
         # Build mapping: gridpoint -> set of fileids
@@ -213,6 +225,7 @@ def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf", a
             param_values[i, j] = float(r["parameter_value"])
 
         # ---- file names
+        _log("Fetching grid file names (data_model_grid_files)")
         files = fetchall_dict(
             conn,
             """
@@ -228,11 +241,14 @@ def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf", a
 
         # ---- quick common-grid test
         check_ids = gp_ids[: min(sample_check_n, len(gp_ids))]
+        _log(f"Checking for common wavelength grid (sampling {len(check_ids)} gridpoints)")
         common, ref_wavelength = is_common_grid(conn, mgridid, check_ids)
         # You can loosen tolerance if needed:
         # common, ref_wavelength = is_common_grid(conn, mgridid, check_ids, atol=1e-12)
+        _log(f"Common wavelength grid: {common}")
 
         # ---- create HDF5
+        _log("Writing HDF5 structure (meta/parameters/gridpoints)")
         with h5py.File(out_path, "w") as h5:
             # meta as attrs
             meta_grp = h5.create_group("meta")
@@ -296,6 +312,7 @@ def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf", a
                     """,
                     (mgridid,)
                 )
+                _log("Streaming spectra rows (common_grid mode)")
 
                 current_gp = None
                 current_row = None
@@ -315,6 +332,10 @@ def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf", a
                     # Write row
                     flux_ds[i, :] = np.asarray(f_list, dtype=np.float32)
 
+                    # Progress indicator every ~1000 gridpoints
+                    if (i + 1) % 1000 == 0:
+                        _log(f"Wrote spectra for {i + 1:,}/{ngp:,} gridpoints")
+
                 for gp, wav, flx in cur:
                     gp = int(gp)
                     if current_gp is None:
@@ -328,6 +349,7 @@ def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf", a
                     current_f.append(float(flx) if flx is not None else np.nan)
 
                 flush_one(current_gp, current_w, current_f)
+                _log(f"Finished writing spectra for {ngp:,} gridpoints")
                 cur.close()
 
                 sgrp.attrs["mode"] = "common_grid"
@@ -368,6 +390,7 @@ def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf", a
                     """,
                     (mgridid,)
                 )
+                _log("Streaming spectra rows (ragged_concat mode)")
 
                 current_gp = None
                 w_buf = []
@@ -393,7 +416,13 @@ def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf", a
                         [float(x) if x is not None else np.nan for x in f_list],
                         dtype=np.float32
                     )
-                    return total_count + n
+                    new_total = total_count + n
+
+                    # Progress indicator every ~10 million points
+                    if new_total // 10_000_000 != total_count // 10_000_000:
+                        _log(f"Appended {new_total:,} spectral points so far")
+
+                    return new_total
 
                 for gp, wav, flx in cur:
                     if current_gp is None:
@@ -407,12 +436,13 @@ def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf", a
                     f_buf.append(flx)
 
                 total = append_buf(current_gp, w_buf, f_buf, total)
+                _log(f"Finished streaming ragged spectra: {total:,} spectral points")
                 cur.close()
 
                 sgrp.create_dataset("offsets", data=offsets)
                 sgrp.create_dataset("lengths", data=lengths)
 
-        print(f"Wrote: {out_path}")
+        _log(f"Wrote: {out_path}")
 
     finally:
         conn.close()
