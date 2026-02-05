@@ -78,7 +78,7 @@ def is_common_grid(conn, mgridid, gridpoint_ids, rtol=0.0, atol=0.0):
 # -----------------------
 # Main export
 # -----------------------
-def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf"):
+def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf", allow_multiple_fileids: bool = True):
     conn = db_connect()
     try:
         # ---- moca_model_grids metadata
@@ -123,16 +123,30 @@ def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf"):
         ngp = len(gp_ids)
         gp_index = {gp: i for i, gp in enumerate(gp_ids)}
 
-        # moca_mgridfileid per gridpoint (should be unique)
-        gp_to_fileid = {}
+        # moca_mgridfileid per gridpoint (allow multiple if configured)
+        # Build mapping: gridpoint -> set of fileids
+        gp_to_fileids = {}
         for r in rows:
             gp = r["model_gridpoint_id"]
             fid = int(r["moca_mgridfileid"])
-            prev = gp_to_fileid.get(gp)
-            if prev is None:
-                gp_to_fileid[gp] = fid
-            elif prev != fid:
-                raise RuntimeError(f"Gridpoint {gp} has multiple moca_mgridfileid: {prev} vs {fid}")
+            if gp not in gp_to_fileids:
+                gp_to_fileids[gp] = set()
+            gp_to_fileids[gp].add(fid)
+
+        conflicts = {gp: sorted(list(fids)) for gp, fids in gp_to_fileids.items() if len(fids) > 1}
+        if conflicts and not allow_multiple_fileids:
+            # Keep message readable
+            sample_items = list(conflicts.items())[:10]
+            sample_str = "; ".join([f"gp={gp} fileids={fids}" for gp, fids in sample_items])
+            raise RuntimeError(
+                f"model_gridpoint_id values mapping to multiple moca_mgridfileid values are not allowed in strict mode. "
+                f"Example: {sample_str}.\n"
+                f"(Your schema allows this because data_model_grid_points is UNIQUE on (moca_mgridpar, moca_mgridid, model_gridpoint_id) without moca_mgridfileid.)\n"
+                f"Re-run without strict mode (default) or pass --allow-multiple-fileids to proceed."
+            )
+
+        # For all gridpoints, pick the smallest fileid (for backwards compatibility and reproducibility)
+        gp_to_fileid = {gp: min(fids) for gp, fids in gp_to_fileids.items()}
 
         # Fill param matrix
         param_values = np.full((ngp, npar), np.nan, dtype=np.float32)
@@ -384,6 +398,18 @@ if __name__ == "__main__":
         help="How many gridpoints to sample when checking for a common wavelength grid",
     )
 
+    ap.add_argument(
+        "--allow-multiple-fileids",
+        action="store_true",
+        default=True,
+        help="(Default: enabled) Allow a model_gridpoint_id to map to multiple moca_mgridfileid values; the exporter chooses the smallest fileid per gridpoint and records conflicts in the HDF5.",
+    )
+    ap.add_argument(
+        "--strict-single-fileid",
+        action="store_true",
+        help="Disallow multiple moca_mgridfileid per model_gridpoint_id (strict mode).",
+    )
+
     args = ap.parse_args()
 
     # Resolve moca_mgridid from positional or flag
@@ -405,4 +431,5 @@ if __name__ == "__main__":
         out_path,
         sample_check_n=args.sample_check_n,
         compression=args.compression,
+        allow_multiple_fileids=(not args.strict_single_fileid),
     )
