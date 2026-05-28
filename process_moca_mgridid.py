@@ -140,7 +140,22 @@ def is_common_grid(conn, mgridid, gridpoint_ids, rtol=0.0, atol=0.0):
 # -----------------------
 # Main export
 # -----------------------
-def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf", allow_multiple_fileids: bool = True):
+def _common_grid_flux_chunks(ngp: int, nlam: int, chunk_gridpoints: int, chunk_wavelengths: int):
+    return (
+        max(1, min(int(chunk_gridpoints), int(ngp))),
+        max(1, min(int(chunk_wavelengths), int(nlam))),
+    )
+
+
+def export_one_mgridid(
+    mgridid,
+    out_path,
+    sample_check_n=3,
+    compression="lzf",
+    allow_multiple_fileids: bool = True,
+    chunk_gridpoints: int = 32,
+    chunk_wavelengths: int = 512,
+):
     conn = db_connect()
     try:
         _log(f"Connected to DB. Exporting moca_mgridid={mgridid} -> {out_path}")
@@ -286,10 +301,15 @@ def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf", a
                 nlam = w.size
                 sgrp.create_dataset("wavelength", data=w, dtype=np.float64)
 
-                # chunking: tune to your typical access pattern
-                # Here: chunk by (some gridpoints) x (some wavelengths)
-                chunk_gp = min(256, ngp)
-                chunk_lam = min(4096, nlam)
+                # RVBAM usually reads one model grid row over a short
+                # wavelength segment. Keep chunks narrow in both dimensions to
+                # avoid decompressing hundreds of unrelated gridpoints.
+                chunk_gp, chunk_lam = _common_grid_flux_chunks(
+                    ngp,
+                    nlam,
+                    chunk_gridpoints=chunk_gridpoints,
+                    chunk_wavelengths=chunk_wavelengths,
+                )
                 flux_ds = sgrp.create_dataset(
                     "flux",
                     shape=(ngp, nlam),
@@ -299,6 +319,9 @@ def export_one_mgridid(mgridid, out_path, sample_check_n=3, compression="lzf", a
                     shuffle=True,
                     fillvalue=np.nan,
                 )
+                flux_ds.attrs["chunk_gridpoints"] = chunk_gp
+                flux_ds.attrs["chunk_wavelengths"] = chunk_lam
+                flux_ds.attrs["chunking_strategy"] = "row_range_optimized"
 
                 # Stream spectra in one ordered pass
                 # Use server-side cursor to avoid loading everything
@@ -480,6 +503,18 @@ if __name__ == "__main__":
     ap.add_argument("--outfile", default=None, help="Optional explicit output filename (overrides default)")
     ap.add_argument("--compression", default="lzf", choices=["lzf", "gzip"], help="HDF5 compression")
     ap.add_argument(
+        "--chunk-gridpoints",
+        type=int,
+        default=32,
+        help="Common-grid flux chunk size along the gridpoint axis.",
+    )
+    ap.add_argument(
+        "--chunk-wavelengths",
+        type=int,
+        default=512,
+        help="Common-grid flux chunk size along the wavelength axis.",
+    )
+    ap.add_argument(
         "--sample-check-n",
         type=int,
         default=3,
@@ -520,4 +555,6 @@ if __name__ == "__main__":
         sample_check_n=args.sample_check_n,
         compression=args.compression,
         allow_multiple_fileids=(not args.strict_single_fileid),
+        chunk_gridpoints=args.chunk_gridpoints,
+        chunk_wavelengths=args.chunk_wavelengths,
     )
